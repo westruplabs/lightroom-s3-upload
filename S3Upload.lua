@@ -3,11 +3,13 @@
 -- macOS: uses /usr/bin/curl + sips
 -- Windows: uses curl (built-in Win10/11) + ImageMagick (magick) for thumbnails
 
-local sha256 = require 'sha256'
+local LrDate = import 'LrDate'
+local sha256  = require 'sha256'
 local M = {}
 
 -- ── OS detection ──────────────────────────────────────────────
-local IS_WIN = package.config:sub(1, 1) == '\\'
+-- WIN_ENV är en global som Lightroom sätter på Windows
+local IS_WIN = (WIN_ENV ~= nil)
 
 -- ── helpers ───────────────────────────────────────────────────
 
@@ -34,10 +36,17 @@ local DEV_NULL = IS_WIN and 'NUL'          or '/dev/null'
 local RM       = IS_WIN and 'del /f /q '   or 'rm -f '
 
 local function tmp_path(suffix)
-  -- os.tmpname() works cross-platform; append suffix for correct MIME detection
-  local base = os.tmpname()
-  if IS_WIN then base = os.getenv('TEMP') .. '\\s3upload_' .. os.time() end
-  return base .. (suffix or '')
+  local t = math.floor(LrDate.currentTime())
+  if IS_WIN then
+    return 'C:\\Windows\\Temp\\s3upload_' .. t .. (suffix or '')
+  else
+    -- Hämta hemkatalogen via shell (io.popen fungerar i LR)
+    local fh   = io.popen('echo $HOME')
+    local home = (fh and fh:read('*line') or ''):gsub('%s+$', '')
+    if fh then fh:close() end
+    local base = (home ~= '') and home or '/private/tmp'
+    return base .. '/.s3upload_' .. t .. (suffix or '')
+  end
 end
 
 local function mime_type(path)
@@ -160,20 +169,28 @@ local function make_thumb(src, max_px)
 end
 
 -- ── upload string content (for meta.json) ────────────────────
+-- Skickar JSON direkt via --data utan tempfil
 
 function M.upload_string(p, content, s3_key)
-  local tmp = tmp_path('.json')
-  local fh  = io.open(tmp, 'w')
-  if not fh then return false, 'Cannot create temp file' end
-  fh:write(content); fh:close()
+  local ep = (p.endpoint:match('[^\r\n]+') or p.endpoint)
+    :gsub('%s', ''):gsub('^https?://', ''):gsub('/+$', '')
+  local url = 'https://' .. ep .. '/' .. encode_path(p.bucket) .. '/' .. encode_path(s3_key)
 
-  local ok, err = M.upload {
-    access_key = p.access_key, secret_key = p.secret_key,
-    region = p.region, bucket = p.bucket, endpoint = p.endpoint,
-    key = s3_key, file_path = tmp, thumb = false,
-  }
-  popen_read(RM .. sh(tmp))
-  return ok, err
+  local curl_flags = IS_WIN and '-sS' or '-sS -k'
+  local cmd = CURL .. ' ' .. curl_flags
+    .. ' -w "\\nHTTPSTATUS:%{http_code}"'
+    .. ' -X PUT'
+    .. ' --aws-sigv4 ' .. sh('aws:amz:' .. p.region .. ':s3')
+    .. ' --user '      .. sh(p.access_key .. ':' .. p.secret_key)
+    .. ' -H '          .. sh('Content-Type: application/json')
+    .. ' --data '      .. sh(content)
+    .. ' '             .. sh(url)
+    .. ' 2>&1'
+
+  local cout = popen_read(cmd)
+  local cs   = tonumber(cout:match('HTTPSTATUS:(%d+)'))
+  if cs == 200 or cs == 204 then return true end
+  return false, string.format('meta.json HTTP %s', tostring(cs))
 end
 
 -- ── public API ────────────────────────────────────────────────
