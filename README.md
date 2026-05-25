@@ -81,4 +81,4 @@ MIT License — free to use, modify, and distribute. Attribution appreciated but
 
 ---
 
-Developed by [Peter Westrup](https://www.peterwestrup.se)
+Developed by [westruplabs](https://www.westruplabs.com)
